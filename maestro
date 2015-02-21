@@ -1,0 +1,108 @@
+#!/usr/bin/env ruby
+# vi: set ft=ruby
+
+require 'pry'
+require 'awesome_print'
+require 'colorize'
+require 'fileutils'
+require 'json'
+require 'brakeman'
+
+SCRIPT_EXECUTION_PATH = Dir.pwd
+ARGV_REPOSITORY_URL = ARGV[0].to_s.strip
+
+class Scanner
+  def initialize repo
+    @repo = repo
+  end
+
+  def output_path
+    File.join(@repo.scans_path, name, @repo.latest_revision[:commit]).tap do |path|
+      FileUtils.mkdir_p File.dirname(path)
+    end
+  end
+
+  def name
+    raise NotImplementedError.new("Must implement `name` method")
+  end
+end
+
+class BrakemanScanner < Scanner
+  def scan
+    system("cd #{@repo.local_repo_path} && brakeman -o #{output_path}.json")
+  end
+
+  def name
+    'brakeman'
+  end
+end
+
+class RubocopScanner < Scanner
+  def scan
+    system("cd #{@repo.local_repo_path} && rubocop --format progress --format json --out #{output_path}.json")
+  end
+
+  def name
+    'rubocop'
+  end
+end
+
+class BundleAuditScanner < Scanner
+  def scan
+    system("cd #{@repo.local_repo_path} && bundle-audit > #{output_path}.txt")
+  end
+
+  def name
+    'bundle_audit'
+  end
+end
+
+class Revision
+end
+
+class Repository
+  attr_reader :remote_repo_url, :local_repo_path, :scans_path, :latest_revision
+
+  def initialize remote_repo_url
+    raise "Missing remote repository URL" if remote_repo_url.empty?
+    @remote_repo_url = remote_repo_url
+    @local_repo_dirname, @local_repo_path, @scans_path = construct_local_repo_path remote_repo_url
+  end
+
+  def clone_or_pull_from_remote
+    if File.directory? @local_repo_path
+      system("cd #{@local_repo_path} && git pull -r")
+    else
+      system("git clone #{@remote_repo_url} #{@local_repo_path}")
+    end
+    parse_latest_revision
+  end
+
+  def parse_latest_revision
+    log_to_json_script = %q{git log -1 --pretty=format:'{%n "commit": "%H",%n "author": "%an",%n "author_email": "%ae",%n "date": "%ad",%n "message": "%f"%n}'}
+    @latest_revision = JSON.parse(`cd #{@local_repo_path} && #{log_to_json_script}`.strip, symbolize_names: true)
+  end
+
+  def scan
+    [BrakemanScanner, RubocopScanner, BundleAuditScanner].each do |scanner|
+      scanner.new(self).scan
+    end
+  end
+
+  private
+
+  def construct_local_repo_path remote_repo_url
+    dir_name = File.basename(remote_repo_url).to_s.split('.').first.to_s
+    [
+      dir_name,
+      File.join(SCRIPT_EXECUTION_PATH, 'repos', dir_name),
+      File.join(SCRIPT_EXECUTION_PATH, 'scans', dir_name)
+    ]
+  end
+end
+
+repo = Repository.new ARGV_REPOSITORY_URL
+repo.clone_or_pull_from_remote
+repo.scan
+print 'Current revision: '
+ap repo.latest_revision
