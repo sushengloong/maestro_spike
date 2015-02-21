@@ -6,6 +6,7 @@ require 'awesome_print'
 require 'colorize'
 require 'fileutils'
 require 'json'
+require 'time'
 require 'brakeman'
 
 SCRIPT_EXECUTION_PATH = Dir.pwd
@@ -17,7 +18,7 @@ class Scanner
   end
 
   def output_path
-    File.join(@repo.scans_path, name, @repo.latest_revision[:commit]).tap do |path|
+    File.join(@repo.scans_path, name, @repo.latest_rev.commit).tap do |path|
       FileUtils.mkdir_p File.dirname(path)
     end
   end
@@ -58,10 +59,27 @@ class BundleAuditScanner < Scanner
 end
 
 class Revision
+  attr_reader :commit, :author, :author_email, :date, :message
+
+  LATEST_LOG_TO_JSON_SCRIPT = %q{git log -1 --pretty=format:'{%n "commit": "%H",%n "author": "%an",%n "author_email": "%ae",%n "date": "%ad",%n "message": "%f"%n}'}
+
+  def initialize commit, author, author_email, date, message
+    @commit = commit
+    @author = author
+    @author_email = author_email
+    @date = date
+    @message = message
+  end
+
+  def self.latest_rev_log_for_repo repo
+    script_output = `cd #{repo.local_repo_path} && #{LATEST_LOG_TO_JSON_SCRIPT}`
+    hash = JSON.parse(script_output.strip, symbolize_names: true)
+    new(hash[:commit], hash[:author], hash[:author_email], Time.parse(hash[:date]), hash[:message])
+  end
 end
 
 class Repository
-  attr_reader :remote_repo_url, :local_repo_path, :scans_path, :latest_revision
+  attr_reader :remote_repo_url, :local_repo_path, :scans_path, :latest_rev
 
   def initialize remote_repo_url
     raise "Missing remote repository URL" if remote_repo_url.empty?
@@ -75,12 +93,11 @@ class Repository
     else
       system("git clone #{@remote_repo_url} #{@local_repo_path}")
     end
-    parse_latest_revision
+    parse_latest_rev
   end
 
-  def parse_latest_revision
-    log_to_json_script = %q{git log -1 --pretty=format:'{%n "commit": "%H",%n "author": "%an",%n "author_email": "%ae",%n "date": "%ad",%n "message": "%f"%n}'}
-    @latest_revision = JSON.parse(`cd #{@local_repo_path} && #{log_to_json_script}`.strip, symbolize_names: true)
+  def parse_latest_rev
+    @latest_rev = Revision.latest_rev_log_for_repo self
   end
 
   def scan
@@ -104,5 +121,4 @@ end
 repo = Repository.new ARGV_REPOSITORY_URL
 repo.clone_or_pull_from_remote
 repo.scan
-print 'Current revision: '
-ap repo.latest_revision
+puts "Current revision: #{repo.latest_rev.inspect}".colorize(:green)
